@@ -56,9 +56,21 @@ class CloudBackup:
         self.bin_dir = self.app_home / "bin"
         self.setting_home = self._discover_setting_home(setting_home)
 
-        self.list_backup_set = self.bin_dir / "ListBackupSet.bat"
-        self.list_backup_job = self.bin_dir / "ListBackupJob.bat"
-        self.run_backup_set = self.bin_dir / "RunBackupSet.bat"
+        self.bjw_exe = (
+            self.app_home / "jvm" / "bin" / "bJW.exe"
+        )
+
+        self.list_backup_set = (
+            self.bin_dir / "ListBackupSet.bat"
+        )
+
+        self.list_backup_job = (
+            self.bin_dir / "ListBackupJob.bat"
+        )
+
+        self.run_backup_set = (
+            self.bin_dir / "RunBackupSet.bat"
+        )
 
         self._validate_installation()
 
@@ -146,12 +158,12 @@ class CloudBackup:
             )
 
         required_files = (
+            self.bjw_exe,
             self.list_backup_set,
             self.list_backup_job,
             self.run_backup_set,
             self.bin_dir / "cb.ini",
             self.bin_dir / "cb.jar",
-            self.app_home / "jvm" / "bin" / "bJW.exe",
         )
 
         missing = [
@@ -177,7 +189,17 @@ class CloudBackup:
         started_at = time.monotonic()
 
         try:
-            process = PtyProcess.spawn(command)
+            try:
+                process = PtyProcess.spawn(
+                    command,
+                    backend=0,
+                )
+            except BaseException as exc:
+                raise CloudBackupError(
+                    "Não foi possível iniciar o processo "
+                    "do CloudBackupPRO através do ConPTY: "
+                    f"{exc}"
+                ) from exc
 
             while process.isalive():
                 if time.monotonic() - started_at > timeout:
@@ -224,33 +246,54 @@ class CloudBackup:
 
         return "".join(output)
 
-    def _run_official_bat(
-        self,
-        batch_file: Path,
-        timeout: int = 1800,
-    ) -> str:
-        if batch_file.parent != self.bin_dir:
-            raise CloudBackupError(
-                f"BAT fora do diretório esperado: {batch_file}"
-            )
-
-        command = (
-            "C:\\Windows\\System32\\cmd.exe "
-            f"/d /c call {batch_file.name} < NUL"
+    def _create_list_backup_set_bridge(self) -> Path:
+        bridge_file = Path(tempfile.gettempdir()) / (
+            f"backup_auto_list_sets_{os.getpid()}.bat"
         )
 
-        previous_directory = Path.cwd()
+        content = (
+            "@echo off\r\n"
+            "setlocal EnableDelayedExpansion\r\n"
+            f'cd /d "{self.bin_dir}"\r\n'
+            "\r\n"
+            "set APP_HOME=..\r\n"
+            "set JAVA_HOME=%APP_HOME%\\jvm\r\n"
+            "set JAVA_EXE=%JAVA_HOME%\\bin\\bJW.exe\r\n"
+            "set JAVA_LIB_PATH=-Djava.library.path=%APP_HOME%\\bin;%APP_HOME%\\bin\\X64\r\n"
+            "set PATH=%JAVA_HOME%\\bin;%PATH%\r\n"
+            "set CLASSPATH=%APP_HOME%\\bin;%APP_HOME%\\bin\\cb.jar\r\n"
+            "\r\n"
+            'set "DEP_LIB_PATH=X64"\r\n'
+            "set INI_FILE=cb.ini\r\n"
+            "set JAVA_OPTS=\r\n"
+            "\r\n"
+            'for /f "tokens=* delims=" %%A in (\'findstr /V /R "^[#]" "%INI_FILE%"\') do (\r\n'
+            '    set "line=%%A"\r\n'
+            '    if not "!line!"=="" set JAVA_OPTS=!JAVA_OPTS! !line!\r\n'
+            ")\r\n"
+            "\r\n"
+            "set PATH=%CD%\\%APP_HOME%\\bin\\%DEP_LIB_PATH%;%PATH%\r\n"
+            "set JAVA_LIB_PATH=%JAVA_LIB_PATH%\r\n"
+            "\r\n"
+            "%JAVA_EXE% %JAVA_LIB_PATH% -cp %CLASSPATH% %JAVA_OPTS% "
+            'ListBackupSet %APP_HOME% ""\r\n'
+            "exit /b %ERRORLEVEL%\r\n"
+        )
 
         try:
-            os.chdir(self.bin_dir)
-
-            return self._run_command(
-                command,
-                timeout,
+            bridge_file.write_text(
+                content,
+                encoding="ascii",
+                errors="ignore",
             )
 
-        finally:
-            os.chdir(previous_directory)
+        except OSError as exc:
+            raise CloudBackupError(
+                "Não foi possível criar o launcher temporário "
+                f"para listar os Backup Sets: {exc}"
+            ) from exc
+
+        return bridge_file
 
     def _create_backup_bridge(
         self,
@@ -297,6 +340,7 @@ class CloudBackup:
                 encoding="ascii",
                 errors="ignore",
             )
+
         except OSError as exc:
             raise CloudBackupError(
                 "Não foi possível criar o launcher temporário "
@@ -305,7 +349,7 @@ class CloudBackup:
 
         return bridge_file
 
-    def _run_backup_bridge(
+    def _run_bridge(
         self,
         bridge_file: Path,
         timeout: int,
@@ -321,10 +365,19 @@ class CloudBackup:
         )
 
     def list_backup_sets(self) -> list[BackupSet]:
-        output = self._run_official_bat(
-            self.list_backup_set,
-            timeout=120,
-        )
+        bridge_file = self._create_list_backup_set_bridge()
+
+        try:
+            output = self._run_bridge(
+                bridge_file,
+                timeout=120,
+            )
+
+        finally:
+            try:
+                bridge_file.unlink(missing_ok=True)
+            except OSError:
+                pass
 
         backup_sets = self._parse_backup_sets(output)
 
@@ -347,10 +400,11 @@ class CloudBackup:
         )
 
         try:
-            output = self._run_backup_bridge(
+            output = self._run_bridge(
                 bridge_file,
                 timeout,
             )
+
         finally:
             try:
                 bridge_file.unlink(missing_ok=True)

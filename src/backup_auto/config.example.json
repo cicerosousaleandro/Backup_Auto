@@ -1,0 +1,9 @@
+{
+    "startup_delay": 30,
+    "backup_sets": [
+        {
+            "name": "nome do Backup Set",
+            "id": "ID_DO_BACKUP_SET"
+        }
+    ]
+}

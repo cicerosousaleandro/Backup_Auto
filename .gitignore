@@ -1,4 +1,5 @@
 # Ambiente Python
+
 .venv/
 venv/
 __pycache__/
@@ -6,30 +7,38 @@ __pycache__/
 *.pyo
 
 # Build
+
 build/
 dist/
 *.spec
 
 # IDE
+
 .vscode/
 .idea/
 
 # Logs
+
 logs/
 *.log
 
 # Arquivos temporários
+
 *.tmp
 *.temp
 
 # Software de terceiros / engenharia reversa
+
 Engenharia_Reve/
 
 # Credenciais e configurações locais
+
 .env
 .env.*
 *.secret
 *.credentials
+config.json
 
 # Java / engenharia reversa
+
 *.class
