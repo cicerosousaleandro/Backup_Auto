@@ -1,130 +1,63 @@
 #define MyAppName "Backup_Auto"
-#define MyAppVersion "1.0.1"
-#define MyAppPublisher "Backup_Auto"
+#define MyAppVersion "1.0.0"
+#define MyAppPublisher "AM3 Soluções"
 #define MyAppExeName "Backup_Auto.exe"
 
 [Setup]
-AppId={{7F3B0F6A-2C9B-4C4F-9D2B-8A8D8F1C6E11}
+AppId={{8F4B6B6D-8E35-4B5F-9F7B-BA9C7A5D9A11}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-DefaultDirName={commonappdata}\Backup_Auto
+DefaultDirName={localappdata}\Backup_Auto
 DisableProgramGroupPage=yes
-DisableDirPage=yes
 OutputDir=output
 OutputBaseFilename=Backup_Auto_Setup
-SetupIconFile=..\images.ico
-UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
-PrivilegesRequired=admin
+PrivilegesRequired=lowest
 ArchitecturesInstallIn64BitMode=x64compatible
-
-[Dirs]
-Name: "{app}"; Permissions: users-modify
-Name: "{app}\logs"; Permissions: users-modify
+SetupIconFile=..\images.ico
+UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Files]
-Source: "..\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\Backup_Auto.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [UninstallDelete]
-Type: filesandordirs; Name: "{app}"
+Type: files; Name: "{userappdata}\Microsoft\Windows\Start Menu\Programs\Startup\Backup_Auto_Start.vbs"
+Type: files; Name: "{userappdata}\Microsoft\Windows\Start Menu\Programs\Startup\Backup_Auto.lnk"
+Type: files; Name: "{userappdata}\Microsoft\Windows\Start Menu\Programs\Startup\Backup_Auto_Start.cmd"
+Type: filesandordirs; Name: "{app}\logs"
 
 [Code]
-function ConfigureBackupAuto(): Boolean;
+
+procedure CreateStartupScript;
 var
-  ResultCode: Integer;
-  ExePath: String;
+  StartupPath: string;
+  ScriptPath: string;
+  ScriptContent: string;
 begin
-  Result := False;
+  StartupPath := ExpandConstant('{userappdata}\Microsoft\Windows\Start Menu\Programs\Startup');
+  ScriptPath := StartupPath + '\Backup_Auto_Start.vbs';
 
-  ExePath := ExpandConstant(
-    '{app}\{#MyAppExeName}'
+  ForceDirectories(StartupPath);
+
+  ScriptContent :=
+    'Set shell = CreateObject("WScript.Shell")' + #13#10 +
+    'shell.Run Chr(34) & "' + ExpandConstant('{app}') + '\Backup_Auto.exe" & Chr(34), 0, False' + #13#10 +
+    'Set shell = Nothing' + #13#10;
+
+  SaveStringToFile(
+    ScriptPath,
+    ScriptContent,
+    False
   );
-
-  WizardForm.StatusLabel.Caption :=
-    'Configurando os Backup Sets do computador...';
-
-  if not FileExists(ExePath) then
-  begin
-    MsgBox(
-      'O Backup_Auto.exe não foi encontrado após a instalação.' +
-      Chr(13) + Chr(10) + Chr(13) + Chr(10) +
-      'Arquivo esperado:' +
-      Chr(13) + Chr(10) +
-      ExePath,
-      mbError,
-      MB_OK
-    );
-
-    Exit;
-  end;
-
-  if ExecAsOriginalUser(
-    ExePath,
-    '--configure',
-    ExpandConstant('{app}'),
-    SW_HIDE,
-    ewWaitUntilTerminated,
-    ResultCode
-  ) then
-  begin
-    if ResultCode = 0 then
-    begin
-      Result := True;
-      Exit;
-    end;
-
-    MsgBox(
-      'Não foi possível configurar automaticamente os Backup Sets do CloudBackupPRO.' +
-      Chr(13) + Chr(10) + Chr(13) + Chr(10) +
-      'Código retornado: ' + IntToStr(ResultCode) +
-      Chr(13) + Chr(10) + Chr(13) + Chr(10) +
-      'Verifique se o CloudBackupPRO está instalado e se existe um Backup Set configurado.',
-      mbError,
-      MB_OK
-    );
-  end
-  else
-  begin
-    MsgBox(
-      'Não foi possível iniciar a configuração automática do Backup_Auto.',
-      mbError,
-      MB_OK
-    );
-  end;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
   begin
-    if not ConfigureBackupAuto() then
-    begin
-      MsgBox(
-        'A instalação do Backup_Auto foi concluída, mas a configuração automática não foi concluída.' +
-        Chr(13) + Chr(10) + Chr(13) + Chr(10) +
-        'O programa foi instalado em:' +
-        Chr(13) + Chr(10) +
-        ExpandConstant('{app}'),
-        mbError,
-        MB_OK
-      );
-    end;
-  end;
-end;
-
-procedure CurUninstallStepChanged(
-  CurUninstallStep: TUninstallStep
-);
-begin
-  if CurUninstallStep = usUninstall then
-  begin
-    RegDeleteValue(
-      HKCU,
-      'Software\Microsoft\Windows\CurrentVersion\Run',
-      'Backup_Auto'
-    );
+    CreateStartupScript;
   end;
 end;

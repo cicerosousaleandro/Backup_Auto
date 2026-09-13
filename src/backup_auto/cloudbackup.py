@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 import tempfile
-import time
 from dataclasses import dataclass
 from pathlib import Path
-
-from winpty import PtyProcess
 
 
 class CloudBackupError(RuntimeError):
@@ -179,205 +177,133 @@ class CloudBackup:
                 + "\n".join(missing)
             )
 
-    def _run_command(
-        self,
-        command: str,
-        timeout: int,
-    ) -> str:
-        process = None
-        output: list[str] = []
-        started_at = time.monotonic()
+    def _load_java_options(self) -> list[str]:
+        ini_file = self.bin_dir / "cb.ini"
 
         try:
-            try:
-                process = PtyProcess.spawn(
-                    command,
-                    backend=0,
-                )
-            except BaseException as exc:
-                raise CloudBackupError(
-                    "Não foi possível iniciar o processo "
-                    "do CloudBackupPRO através do ConPTY: "
-                    f"{exc}"
-                ) from exc
+            lines = ini_file.read_text(
+                encoding="utf-8",
+                errors="ignore",
+            ).splitlines()
 
-            while process.isalive():
-                if time.monotonic() - started_at > timeout:
-                    try:
-                        process.terminate()
-                    except Exception:
-                        pass
-
-                    raise CloudBackupError(
-                        f"Tempo limite excedido ao executar: {command}"
-                    )
-
-                try:
-                    data = process.read(4096)
-
-                    if data:
-                        output.append(data)
-
-                except EOFError:
-                    break
-
-                time.sleep(0.05)
-
-            try:
-                while True:
-                    data = process.read(4096)
-
-                    if not data:
-                        break
-
-                    output.append(data)
-
-            except EOFError:
-                pass
-
-        except CloudBackupError:
-            raise
-
-        except Exception as exc:
+        except OSError as exc:
             raise CloudBackupError(
-                "Não foi possível executar o CloudBackupPRO: "
+                f"Não foi possível ler o arquivo cb.ini: {exc}"
+            ) from exc
+
+        options: list[str] = []
+
+        for line in lines:
+            line = line.strip()
+
+            if not line or line.startswith("#"):
+                continue
+
+            options.extend(line.split())
+
+        return options
+
+    def _build_java_command(
+        self,
+        java_class: str,
+        arguments: list[str],
+    ) -> list[str]:
+        library_path = (
+            f"{self.bin_dir};"
+            f"{self.bin_dir / 'X64'}"
+        )
+
+        classpath = (
+            f"{self.bin_dir};"
+            f"{self.bin_dir / 'cb.jar'}"
+        )
+
+        command = [
+            str(self.bjw_exe),
+            f"-Djava.library.path={library_path}",
+            "-cp",
+            classpath,
+        ]
+
+        command.extend(self._load_java_options())
+        command.append(java_class)
+        command.extend(arguments)
+
+        return command
+
+    def _run_java(
+        self,
+        java_class: str,
+        arguments: list[str],
+        timeout: int,
+    ) -> str:
+        command = self._build_java_command(
+            java_class,
+            arguments,
+        )
+
+        environment = os.environ.copy()
+
+        java_bin = self.app_home / "jvm" / "bin"
+        x64_bin = self.bin_dir / "X64"
+
+        environment["PATH"] = (
+            f"{java_bin};"
+            f"{x64_bin};"
+            f"{self.bin_dir};"
+            f"{environment.get('PATH', '')}"
+        )
+
+        creation_flags = getattr(
+            subprocess,
+            "CREATE_NO_WINDOW",
+            0,
+        )
+
+        try:
+            result = subprocess.run(
+                command,
+                cwd=self.bin_dir,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                creationflags=creation_flags,
+                check=False,
+            )
+
+        except subprocess.TimeoutExpired as exc:
+            raise CloudBackupError(
+                f"Tempo limite excedido ao executar "
+                f"o CloudBackupPRO: {java_class}"
+            ) from exc
+
+        except OSError as exc:
+            raise CloudBackupError(
+                "Não foi possível iniciar o CloudBackupPRO: "
                 f"{exc}"
             ) from exc
 
-        return "".join(output)
+        output = result.stdout or ""
 
-    def _create_list_backup_set_bridge(self) -> Path:
-        bridge_file = Path(tempfile.gettempdir()) / (
-            f"backup_auto_list_sets_{os.getpid()}.bat"
-        )
-
-        content = (
-            "@echo off\r\n"
-            "setlocal EnableDelayedExpansion\r\n"
-            f'cd /d "{self.bin_dir}"\r\n'
-            "\r\n"
-            "set APP_HOME=..\r\n"
-            "set JAVA_HOME=%APP_HOME%\\jvm\r\n"
-            "set JAVA_EXE=%JAVA_HOME%\\bin\\bJW.exe\r\n"
-            "set JAVA_LIB_PATH=-Djava.library.path=%APP_HOME%\\bin;%APP_HOME%\\bin\\X64\r\n"
-            "set PATH=%JAVA_HOME%\\bin;%PATH%\r\n"
-            "set CLASSPATH=%APP_HOME%\\bin;%APP_HOME%\\bin\\cb.jar\r\n"
-            "\r\n"
-            'set "DEP_LIB_PATH=X64"\r\n'
-            "set INI_FILE=cb.ini\r\n"
-            "set JAVA_OPTS=\r\n"
-            "\r\n"
-            'for /f "tokens=* delims=" %%A in (\'findstr /V /R "^[#]" "%INI_FILE%"\') do (\r\n'
-            '    set "line=%%A"\r\n'
-            '    if not "!line!"=="" set JAVA_OPTS=!JAVA_OPTS! !line!\r\n'
-            ")\r\n"
-            "\r\n"
-            "set PATH=%CD%\\%APP_HOME%\\bin\\%DEP_LIB_PATH%;%PATH%\r\n"
-            "set JAVA_LIB_PATH=%JAVA_LIB_PATH%\r\n"
-            "\r\n"
-            "%JAVA_EXE% %JAVA_LIB_PATH% -cp %CLASSPATH% %JAVA_OPTS% "
-            'ListBackupSet %APP_HOME% ""\r\n'
-            "exit /b %ERRORLEVEL%\r\n"
-        )
-
-        try:
-            bridge_file.write_text(
-                content,
-                encoding="ascii",
-                errors="ignore",
+        if result.returncode != 0:
+            raise CloudBackupError(
+                "O CloudBackupPRO retornou código "
+                f"{result.returncode}.\n\n"
+                f"Saída recebida:\n{output}"
             )
 
-        except OSError as exc:
-            raise CloudBackupError(
-                "Não foi possível criar o launcher temporário "
-                f"para listar os Backup Sets: {exc}"
-            ) from exc
-
-        return bridge_file
-
-    def _create_backup_bridge(
-        self,
-        backup_set: BackupSet,
-    ) -> Path:
-        bridge_file = Path(tempfile.gettempdir()) / (
-            f"backup_auto_run_{os.getpid()}_{backup_set.id}.bat"
-        )
-
-        content = (
-            "@echo off\r\n"
-            "setlocal EnableDelayedExpansion\r\n"
-            f'cd /d "{self.bin_dir}"\r\n'
-            "\r\n"
-            "set APP_HOME=..\r\n"
-            "set JAVA_HOME=%APP_HOME%\\jvm\r\n"
-            "set JAVA_EXE=%JAVA_HOME%\\bin\\bJW.exe\r\n"
-            "set JAVA_LIB_PATH=-Djava.library.path=%APP_HOME%\\bin\r\n"
-            "set PATH=%JAVA_HOME%\\bin;%PATH%\r\n"
-            "set CLASSPATH=%APP_HOME%\\bin;%APP_HOME%\\bin\\cb.jar\r\n"
-            "\r\n"
-            'set "DEP_LIB_PATH=X64"\r\n'
-            "set INI_FILE=cb.ini\r\n"
-            "set JAVA_OPTS=\r\n"
-            "\r\n"
-            'for /f "tokens=* delims=" %%A in (\'findstr /V /R "^[#]" "%INI_FILE%"\') do (\r\n'
-            '    set "line=%%A"\r\n'
-            '    if not "!line!"=="" set JAVA_OPTS=!JAVA_OPTS! !line!\r\n'
-            ")\r\n"
-            "\r\n"
-            "set PATH=%CD%\\%APP_HOME%\\bin\\%DEP_LIB_PATH%;%PATH%\r\n"
-            "set JAVA_LIB_PATH=%JAVA_LIB_PATH%;%APP_HOME%\\bin\\%DEP_LIB_PATH%\r\n"
-            "\r\n"
-            f'echo Running Backup Set - "{backup_set.id}" ...\r\n'
-            "%JAVA_EXE% %JAVA_LIB_PATH% -cp %CLASSPATH% %JAVA_OPTS% "
-            f'RunBackupSet %APP_HOME% "{backup_set.id}" "ALL" "FILE" "" "" '
-            '"DISABLE-CLEANUP" "DISABLE-DEBUG"\r\n'
-            "exit /b %ERRORLEVEL%\r\n"
-        )
-
-        try:
-            bridge_file.write_text(
-                content,
-                encoding="ascii",
-                errors="ignore",
-            )
-
-        except OSError as exc:
-            raise CloudBackupError(
-                "Não foi possível criar o launcher temporário "
-                f"do Backup Set: {exc}"
-            ) from exc
-
-        return bridge_file
-
-    def _run_bridge(
-        self,
-        bridge_file: Path,
-        timeout: int,
-    ) -> str:
-        command = (
-            "C:\\Windows\\System32\\cmd.exe "
-            f"/d /c {bridge_file} < NUL"
-        )
-
-        return self._run_command(
-            command,
-            timeout,
-        )
+        return output
 
     def list_backup_sets(self) -> list[BackupSet]:
-        bridge_file = self._create_list_backup_set_bridge()
-
-        try:
-            output = self._run_bridge(
-                bridge_file,
-                timeout=120,
-            )
-
-        finally:
-            try:
-                bridge_file.unlink(missing_ok=True)
-            except OSError:
-                pass
+        output = self._run_java(
+            "ListBackupSet",
+            ["..", ""],
+            timeout=120,
+        )
 
         backup_sets = self._parse_backup_sets(output)
 
@@ -395,21 +321,20 @@ class CloudBackup:
         backup_set: BackupSet,
         timeout: int = 7200,
     ) -> BackupResult:
-        bridge_file = self._create_backup_bridge(
-            backup_set
+        output = self._run_java(
+            "RunBackupSet",
+            [
+                "..",
+                backup_set.id,
+                "ALL",
+                "FILE",
+                "",
+                "",
+                "DISABLE-CLEANUP",
+                "DISABLE-DEBUG",
+            ],
+            timeout=timeout,
         )
-
-        try:
-            output = self._run_bridge(
-                bridge_file,
-                timeout,
-            )
-
-        finally:
-            try:
-                bridge_file.unlink(missing_ok=True)
-            except OSError:
-                pass
 
         normalized_output = output.lower()
 
